@@ -10,7 +10,7 @@ from PIL import Image
 app = Flask(__name__)
 
 # ==========================================
-# 1. AI ARCHITECTURE
+# 1. MODEL ARCHITECTURE
 # ==========================================
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
@@ -47,64 +47,78 @@ class SRResNet(nn.Module):
         return torch.sigmoid(self.conv3(self.upsample_blocks(x1 + x2)))
 
 # ==========================================
-# 2. INITIALIZE CPU MODEL
+# 2. MODEL INITIALIZATION (CPU ONLY)
 # ==========================================
-# Vercel does not have GPUs. We must force CPU mapping.
 DEVICE = torch.device("cpu")
 model = SRResNet(upscale_factor=4).to(DEVICE)
 model_path = "4k_dslr_clarity_model.pth"
 
 if os.path.exists(model_path):
     model.load_state_dict(torch.load(model_path, map_location=DEVICE, weights_only=True))
+    print("Model loaded successfully.")
+else:
+    print(f"Warning: '{model_path}' not found. Inference will run with random weights.")
+
 model.eval()
 
 # ==========================================
-# 3. FLASK ROUTES
+# 3. HTML INTERFACE & ROUTES
 # ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>4K AI Upscaler</title>
+    <title>4K AI Upscaler - Render</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: sans-serif; max-width: 800px; margin: 40px auto; text-align: center; }
-        .container { border: 2px dashed #ccc; padding: 40px; border-radius: 10px; }
-        img { max-width: 100%; margin-top: 20px; border-radius: 8px; }
-        button { padding: 10px 20px; background: #0070f3; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; text-align: center; background: #f9f9f9; }
+        .card { background: white; border: 1px solid #e0e0e0; padding: 32px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        input[type="file"] { margin: 20px 0; }
+        button { padding: 12px 24px; background: #4f46e5; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
+        button:disabled { background: #9ca3af; cursor: not-allowed; }
+        #status { margin-top: 16px; color: #4b5563; font-size: 14px; }
+        img { max-width: 100%; margin-top: 24px; border-radius: 8px; border: 1px solid #ddd; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h2>Upload Low-Res Photo</h2>
-        <form id="uploadForm" enctype="multipart/form-data">
-            <input type="file" id="imageInput" name="image" accept="image/*" required>
-            <br><br>
-            <button type="submit" id="submitBtn">Upscale (Max 300px)</button>
+    <div class="card">
+        <h2>4K AI Image Upscaler</h2>
+        <p>Upload a low-resolution image to upscale it 4x using SRResNet.</p>
+        <form id="uploadForm">
+            <input type="file" id="imageInput" name="image" accept="image/*" required><br>
+            <button type="submit" id="submitBtn">Enhance Resolution</button>
         </form>
-        <div id="loading" style="display:none; margin-top: 20px;">Processing on CPU... please wait up to 10 seconds.</div>
+        <div id="status"></div>
         <img id="resultImage" style="display:none;" />
     </div>
 
     <script>
         document.getElementById('uploadForm').onsubmit = async (e) => {
             e.preventDefault();
-            const formData = new FormData(e.target);
-            document.getElementById('loading').style.display = 'block';
-            document.getElementById('resultImage').style.display = 'none';
-            document.getElementById('submitBtn').disabled = true;
+            const form = e.target;
+            const status = document.getElementById('status');
+            const resultImg = document.getElementById('resultImage');
+            const btn = document.getElementById('submitBtn');
+
+            btn.disabled = true;
+            status.textContent = "Processing image on CPU... this may take 5-15 seconds.";
+            resultImg.style.display = 'none';
 
             try {
-                const response = await fetch('/upscale', { method: 'POST', body: formData });
+                const response = await fetch('/upscale', {
+                    method: 'POST',
+                    body: new FormData(form)
+                });
                 if (!response.ok) throw new Error(await response.text());
-                
+
                 const blob = await response.blob();
-                document.getElementById('resultImage').src = URL.createObjectURL(blob);
-                document.getElementById('resultImage').style.display = 'block';
-            } catch (error) {
-                alert('Error: ' + error.message);
+                resultImg.src = URL.createObjectURL(blob);
+                resultImg.style.display = 'block';
+                status.textContent = "Upscale complete!";
+            } catch (err) {
+                status.textContent = "Error: " + err.message;
             } finally {
-                document.getElementById('loading').style.display = 'none';
-                document.getElementById('submitBtn').disabled = false;
+                btn.disabled = false;
             }
         };
     </script>
@@ -113,7 +127,7 @@ HTML_TEMPLATE = """
 """
 
 @app.route('/')
-def index():
+def home():
     return HTML_TEMPLATE
 
 @app.route('/upscale', methods=['POST'])
@@ -126,26 +140,22 @@ def upscale():
         return "No selected file", 400
 
     try:
-        # Load and verify image
         img = Image.open(file.stream).convert('RGB')
         
-        # Vercel CPU restriction: large images will exceed the 10-second timeout
-        max_dim = 300
+        # Free-tier RAM safeguard: Resize input if over 500px to prevent OOM
+        max_dim = 500
         if img.width > max_dim or img.height > max_dim:
             img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
             
-        # Transform and infer
         transform = transforms.ToTensor()
         input_tensor = transform(img).unsqueeze(0).to(DEVICE)
         
         with torch.no_grad():
             output_tensor = model(input_tensor).squeeze(0)
             
-        # Convert back to image in memory
         to_pil = transforms.ToPILImage()
         output_image = to_pil(output_tensor)
         
-        # Save to BytesIO object (Vercel filesystem is read-only)
         img_io = io.BytesIO()
         output_image.save(img_io, 'JPEG', quality=95)
         img_io.seek(0)
@@ -156,4 +166,5 @@ def upscale():
         return str(e), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
