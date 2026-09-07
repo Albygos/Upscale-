@@ -54,7 +54,6 @@ model = SRResNet(upscale_factor=4).to(DEVICE)
 model_path = "4k_dslr_clarity_model.pth"
 
 if os.path.exists(model_path):
-    # weights_only=True prevents security warnings in newer PyTorch versions
     model.load_state_dict(torch.load(model_path, map_location=DEVICE, weights_only=True))
     print("Model loaded successfully.")
 else:
