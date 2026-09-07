@@ -1,6 +1,7 @@
 import os
 import math
 import io
+import gc
 import torch
 import torch.nn as nn
 from flask import Flask, request, send_file
@@ -101,7 +102,7 @@ HTML_TEMPLATE = """
             const btn = document.getElementById('submitBtn');
 
             btn.disabled = true;
-            status.textContent = "Processing image on CPU... this may take 5-15 seconds.";
+            status.textContent = "Processing... Render's free tier is slow, this may take up to 60 seconds.";
             resultImg.style.display = 'none';
 
             try {
@@ -142,19 +143,26 @@ def upscale():
     try:
         img = Image.open(file.stream).convert('RGB')
         
-        # Free-tier RAM safeguard: Resize input if over 500px to prevent OOM
-        max_dim = 500
+        # EXTREME RAM SAFEGUARD FOR RENDER FREE TIER (512MB RAM Limit)
+        # Cap to 250px. 250px inputs scale up to 1000px outputs perfectly.
+        # Anything larger will crash the OOM Killer.
+        max_dim = 250
         if img.width > max_dim or img.height > max_dim:
             img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
             
         transform = transforms.ToTensor()
         input_tensor = transform(img).unsqueeze(0).to(DEVICE)
         
-        with torch.no_grad():
+        # Use inference_mode instead of no_grad (Uses less memory and runs faster)
+        with torch.inference_mode():
             output_tensor = model(input_tensor).squeeze(0)
             
         to_pil = transforms.ToPILImage()
         output_image = to_pil(output_tensor)
+        
+        # Force garbage collection immediately to dump PyTorch's temporary calculations
+        del input_tensor, output_tensor
+        gc.collect()
         
         img_io = io.BytesIO()
         output_image.save(img_io, 'JPEG', quality=95)
